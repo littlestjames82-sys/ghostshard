@@ -16,10 +16,23 @@ from dataclasses import dataclass
 
 @dataclass
 class Subtask:
+    """One user-supplied subtask: a ``## `` heading plus its free text."""
+
     title: str
     text: str
 
 def parse_task_file(text: str) -> list[Subtask]:
+    """Parse a user-split task file into a list of :class:`Subtask`.
+
+    Format: each subtask starts at a ``## Heading`` line; the lines
+    below it are that subtask's text. ``#`` comment lines before the
+    first heading are ignored.
+
+    Raises:
+        ValueError: if non-comment text appears before the first
+            heading, if there are no ``## `` sections, or if a
+            heading has an empty title.
+    """
     subs: list[Subtask] = []
     cur_title, cur_lines = None, []
     def flush():
@@ -41,6 +54,13 @@ def parse_task_file(text: str) -> list[Subtask]:
     return subs
 
 def slugify(title: str) -> str:
+    """Slugify a shard title for use in a shard id.
+
+    Lowercases, replaces each run of non-alphanumeric characters
+    with ``-``, trims leading/trailing ``-``, and truncates to 40
+    characters. Returns ``"shard"`` when nothing usable remains.
+    Example: ``"cluster: alpha.py"`` becomes ``"cluster-alpha-py"``.
+    """
     import re
     s = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return s[:40] or "shard"

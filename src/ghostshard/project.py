@@ -16,6 +16,14 @@ TEXT_EXTS = {".py", ".js", ".mjs", ".ts", ".tsx", ".jsx", ".md", ".txt",
 
 @dataclass
 class FileInfo:
+    """One scanned project file and what the scanner learned about it.
+
+    ``symbols`` are names defined here, ``imports`` are resolved
+    project-internal paths this file imports, ``external_imports``
+    are import names that did not resolve inside the project, and
+    ``references`` are names used (Python only, via ``ast``).
+    """
+
     rel: str
     text: str
     language: str = "other"
@@ -30,6 +38,12 @@ class FileInfo:
         return parts[0] if len(parts) > 1 else "."
 
 def language_for(rel: str) -> str:
+    """Return the language label for a relative path, by extension.
+
+    Known extensions map to ``python``, ``javascript``,
+    ``typescript``, ``markdown``, ``go``, ``rust``, or ``java``;
+    anything else is ``"other"`` (parser-lite handling).
+    """
     ext = Path(rel).suffix.lower()
     return {".py": "python", ".js": "javascript", ".mjs": "javascript",
             ".ts": "typescript", ".tsx": "typescript", ".jsx": "javascript",
@@ -47,6 +61,14 @@ def _gitignore_matchers(root: Path):
     return pats
 
 def scan_project(root) -> dict[str, FileInfo]:
+    """Scan a project tree and return ``{relative_path: FileInfo}``.
+
+    Only recognised text extensions are included. Built-in ignore
+    names (``.git``, ``__pycache__``, ``node_modules``, and similar)
+    plus simple ``.gitignore`` entries are skipped, and files that
+    are not valid UTF-8 are skipped. A second pass fills in symbols
+    and imports once the full file set is known.
+    """
     root = Path(root)
     ignored_names = set(DEFAULT_IGNORES) | set(_gitignore_matchers(root))
     files: dict[str, FileInfo] = {}

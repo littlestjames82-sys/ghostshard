@@ -20,7 +20,7 @@ import math, re
 from collections import defaultdict
 from pathlib import Path
 
-from .project import scan_project, build_graph, strongly_connected_components
+from .project import scan_project, build_graph, strongly_connected_components, find_cycle
 from .tokens import estimate_tokens
 from .taskfile import Subtask, slugify
 
@@ -61,6 +61,16 @@ def score_file(task_text: str, fi) -> float:
     return hit + 2.0 * len(tt & sym)
 
 class ShardDraft:
+    """Work-in-progress shard before ids, groups, and budgets are set.
+
+    Attributes: ``title`` and ``task`` (the shard's task text, never
+    invented: user text in user-split mode, a generated graph
+    description in auto-clustered mode), ``owns`` (files this shard
+    owns), ``shared`` (read-only files), ``depends_on`` (shard ids),
+    ``rules_fired`` (human-readable record of conservative rules that
+    fired), and ``unfittable_reason``.
+    """
+
     def __init__(self, title, task_text):
         self.title = title; self.task = task_text
         self.owns: list[str] = []
@@ -71,7 +81,29 @@ class ShardDraft:
 
 def plan_project(root, *, task=None, subtasks=None, budget_tokens=60000,
                  max_shards=12, max_shared_fanout=8):
-    """Return a plan dict (no files written). See write_plan()."""
+    """Plan shards for a project and return the plan dict.
+
+    No files are written here; pass the result to
+    :func:`ghostshard.bundles.write_plan` to write bundles and plan
+    artifacts.
+
+    Args:
+        root: Project directory to scan.
+        task: Freeform task string for auto-clustered mode. Ignored
+            when ``subtasks`` is given.
+        subtasks: List of ``taskfile.Subtask`` for user-split mode.
+            When given, the plan mode is ``"user-split"``; otherwise
+            it is ``"auto-clustered"``.
+        budget_tokens: Per-shard estimated-token budget.
+        max_shards: Shard count above which the plan is partial.
+        max_shared_fanout: Read-only sharing count above which the
+            plan is partial.
+
+    Returns:
+        A dict with ``mode``, ``shards``, ``parallel_groups``,
+        ``max_parallelism``, ``conflicts``, ``partial``, the scanned
+        ``files`` and import ``graph``, and the limits applied.
+    """
     files = scan_project(root)
     graph = build_graph(files)
     sccs = strongly_connected_components(graph)
@@ -81,6 +113,7 @@ def plan_project(root, *, task=None, subtasks=None, budget_tokens=60000,
             comp_of[f] = i
     mode = "user-split" if subtasks else "auto-clustered"
     conflicts: list[str] = []
+    partial = False
 
     # ---- select relevant files -------------------------------------
     if subtasks:
@@ -175,6 +208,13 @@ def plan_project(root, *, task=None, subtasks=None, budget_tokens=60000,
             for rel in comp:
                 unit_of_file[rel] = len(drafts) - 1
 
+    if not drafts:
+        # An empty plan must never look like a successful complete plan.
+        partial = True
+        conflicts.append("empty-plan: no shards produced (project has no "
+                         "scannable files, or no file matched the task); "
+                         "plan marked partial")
+
     # ---- shard ids ---------------------------------------------------
     for i, d in enumerate(drafts):
         d.id = f"shard-{i+1:02d}-{slugify(d.title)}"
@@ -237,8 +277,58 @@ def plan_project(root, *, task=None, subtasks=None, budget_tokens=60000,
         seq_edges.append((db.id, da.id, reason))
         db.rules_fired.append(f"conservative-sequence: sequenced after {da.id} ({reason})")
 
+    # ---- contract shard-level dependency cycles -----------------------
+    # File-level import deps form a DAG once SCCs are contracted, but a
+    # shard groups several SCCs (user assignment, package merge), and a
+    # quotient of a DAG can cycle: shard A imports a file owned by B
+    # while B imports a different file owned by A. Such a plan is
+    # unschedulable and fails `check`, so contract each cycle into one
+    # shard, exactly as file-level SCCs are contracted in project.py.
+    while drafts:
+        cyc = find_cycle({d.id: sorted(d.depends_on) for d in drafts})
+        if not cyc:
+            break
+        member_ids = list(dict.fromkeys(cyc))
+        members = [d for d in drafts if d.id in member_ids]
+        keep = members[0]
+        ext_deps = set()
+        for m in members:
+            ext_deps |= set(m.depends_on)
+        ext_deps -= set(member_ids)
+        for m in members[1:]:
+            keep.owns = sorted(set(keep.owns) | set(m.owns))
+            keep.task = keep.task + "\n\n" + m.task
+            keep.rules_fired.extend(m.rules_fired)
+        keep.depends_on = ext_deps
+        keep.rules_fired.append(
+            f"dependency-cycle-merged: shards {', '.join(member_ids)} formed "
+            f"a dependency cycle; merged into {keep.id}")
+        conflicts.append(
+            f"dependency-cycle: shards {', '.join(member_ids)} depended on "
+            f"each other in a cycle; contracted into one shard {keep.id}")
+        removed = set(member_ids) - {keep.id}
+        drafts = [d for d in drafts if d.id not in removed]
+        for d in drafts:
+            d.depends_on = {(keep.id if x in removed else x)
+                            for x in d.depends_on} - {d.id}
+        # shared read-only context changes with the new ownership map
+        owner_now = {rel: d for d in drafts for rel in d.owns}
+        for d in drafts:
+            sh = set()
+            for rel in d.owns:
+                for tgt in graph.get(rel, []):
+                    o = owner_now.get(tgt)
+                    if o is not None and o is not d:
+                        sh.add(tgt)
+            d.shared = sorted(sh - set(d.owns))
+    alive = {d.id for d in drafts}
+    seq_edges = [e for e in seq_edges if e[0] in alive and e[1] in alive]
+    # shared symbols follow the final (post-contraction) shared sets
+    shard_shared_symbols = {
+        d.id: sorted({s for f in d.shared for s in files[f].symbols})
+        for d in drafts}
+
     # ---- fan-out cap -------------------------------------------------
-    partial = False; notes = []
     fanout: dict[str, int] = defaultdict(int)
     for d in drafts:
         for t in d.shared: fanout[t] += 1
@@ -248,14 +338,21 @@ def plan_project(root, *, task=None, subtasks=None, budget_tokens=60000,
             conflicts.append(f"fanout-cap: {rel} is read-only context for {n} shards (cap {max_shared_fanout}); plan marked partial")
 
     # ---- parallel groups (topological levels) ------------------------
-    levels: dict[str, int] = {}
-    def level_of(d, stack=()):
-        if d.id in levels: return levels[d.id]
-        if d.id in stack: return 0  # cycle would be a check failure; planner dep graph is acyclic by SCC contraction + added edges form index order
-        deps = [x for x in drafts if x.id in d.depends_on]
-        lv = 0 if not deps else 1 + max(level_of(x, stack + (d.id,)) for x in deps)
-        levels[d.id] = lv; return lv
-    for d in drafts: level_of(d)
+    # Iterative longest-path levels: no recursion (deep dependency
+    # chains cannot overflow the stack) and no silent cycle fallback
+    # (cycles were contracted above; a leftover cycle simply stops
+    # improving after len(drafts) passes instead of looping forever).
+    levels: dict[str, int] = {d.id: 0 for d in drafts}
+    for _ in range(len(drafts)):
+        changed = False
+        for d in drafts:
+            deps = [levels[x] for x in d.depends_on if x in levels]
+            if deps:
+                lv = 1 + max(deps)
+                if lv > levels[d.id]:
+                    levels[d.id] = lv; changed = True
+        if not changed:
+            break
     groups: dict[int, list[str]] = defaultdict(list)
     for d in drafts: groups[levels[d.id]].append(d.id)
     parallel_groups = [sorted(groups[k]) for k in sorted(groups)]

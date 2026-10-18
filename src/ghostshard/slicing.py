@@ -5,6 +5,15 @@ from __future__ import annotations
 import ast, re
 
 def signatures_of(text: str, language: str) -> str:
+    """Return the signatures-level view of a source file.
+
+    This is the form a shared (read-only) file takes in another
+    shard's bundle: enough to code against, without the full body.
+    Python files keep imports, ``def``/``class`` lines, the first
+    docstring line, and uppercase constants. Other languages keep
+    definition and import lines only (parser-lite). Unparseable
+    Python yields an empty string.
+    """
     if language == "python":
         return _py_signatures(text)
     return _lite_signatures(text)

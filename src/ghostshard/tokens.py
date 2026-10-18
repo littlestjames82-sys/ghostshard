@@ -6,6 +6,13 @@ import math, re
 _RUN = re.compile(r"[A-Za-z0-9_]+|[^\w\s]")
 
 def estimate_tokens(text: str) -> int:
+    """Estimate the token count of *text* (never an exact count).
+
+    Word-like runs of up to 4 characters count as 1 token; longer
+    runs count as ``ceil(len / 4)``. Empty or ``None`` input counts
+    as 0. Every artifact that reports this value labels it with
+    :data:`ESTIMATOR_NOTE`.
+    """
     total = 0
     for m in _RUN.finditer(text or ""):
         s = m.group(0)
