@@ -1,5 +1,6 @@
 # GhostShard
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/littlestjames82-sys/ghostshard/actions/workflows/ci.yml/badge.svg)](https://github.com/littlestjames82-sys/ghostshard/actions/workflows/ci.yml/actions)
 
 **Plan the packets. Shard never runs the work.**
 
